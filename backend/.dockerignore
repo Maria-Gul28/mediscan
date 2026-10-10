@@ -1,4 +1,5 @@
-venv/
-.env
-build/
-.dart_tool/
+mediscan/
+├── backend/        ← app.py, ai.py, tts.py, requirements.txt, Dockerfile, .dockerignore
+├── render.yaml     ← at the repo root
+├── .gitignore
+└── mediscan_app/   ← your Flutter project (lib/, pubspec.yaml, android/ ...)
