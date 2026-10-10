@@ -1,15 +1,5 @@
-"""
-Text -> MP3 speech for MediScan.
-
-synthesize(text, lang) returns raw MP3 bytes.
-
-Strategy:
-  1. edge-tts (Microsoft neural voices) - best quality, has real Urdu voices.
-  2. gTTS (Google Translate TTS) - fallback if edge-tts fails, e.g. because
-     the hosting provider's IP is blocked or the service is unreachable.
-
-If both fail, an exception is raised and app.py returns a 502, which makes
-the Flutter app fall back to the phone's own voice.
+"""Text-to-speech helper for MediScan's /api/tts endpoint.
+Uses Edge TTS and falls back to gTTS if Edge TTS is unavailable.
 """
 import asyncio
 import io
@@ -17,40 +7,32 @@ import io
 import edge_tts
 from gtts import gTTS
 
-_EDGE_VOICES = {
+_VOICES = {
+    "en": "en-US-AriaNeural",
     "ur": "ur-PK-UzmaNeural",
-    "en": "en-US-JennyNeural",
 }
 
 
-async def _edge_synthesize(text: str, voice: str) -> bytes:
+async def _edge_audio(text: str, voice: str) -> bytes:
     communicate = edge_tts.Communicate(text, voice)
-    chunks = []
+    output = bytearray()
     async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            chunks.append(chunk["data"])
-    audio = b"".join(chunks)
-    if not audio:
-        raise RuntimeError("edge-tts returned no audio")
-    return audio
-
-
-def _gtts_synthesize(text: str, lang: str) -> bytes:
-    buf = io.BytesIO()
-    gTTS(text=text, lang="ur" if lang == "ur" else "en").write_fp(buf)
-    return buf.getvalue()
+        if chunk.get("type") == "audio":
+            output.extend(chunk["data"])
+    if not output:
+        raise RuntimeError("Text-to-speech returned no audio.")
+    return bytes(output)
 
 
 def synthesize(text: str, lang: str = "en") -> bytes:
-    lang = "ur" if lang == "ur" else "en"
-    voice = _EDGE_VOICES[lang]
-
+    clean_text = (text or "").strip()[:1500]
+    if not clean_text:
+        raise ValueError("Text is empty.")
+    language = "ur" if lang == "ur" else "en"
     try:
-        return asyncio.run(_edge_synthesize(text, voice))
-    except Exception as edge_err:  # noqa: BLE001
-        try:
-            return _gtts_synthesize(text, lang)
-        except Exception as gtts_err:  # noqa: BLE001
-            raise RuntimeError(
-                f"edge-tts failed ({edge_err}); gTTS failed ({gtts_err})"
-            ) from gtts_err
+        return asyncio.run(_edge_audio(clean_text, _VOICES[language]))
+    except Exception:
+        # gTTS fallback; it also returns MP3 bytes.
+        output = io.BytesIO()
+        gTTS(text=clean_text, lang=language).write_to_fp(output)
+        return output.getvalue()
