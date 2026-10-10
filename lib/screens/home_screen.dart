@@ -7,6 +7,7 @@ import '../l10n/strings.dart';
 import '../services/app_state.dart';
 import '../services/api_service.dart';
 import '../services/stt_service.dart';
+import '../services/tts_service.dart';
 import '../theme/app_colors.dart';
 import '../widgets/ask_ai_fab.dart';
 import '../widgets/medicine_info_card.dart';
@@ -22,6 +23,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final _picker = ImagePicker();
   final _api = ApiService();
   final _stt = SttService();
+  final _tts = TtsService();
 
   File? _selectedImage;
   bool _isListening = false;
@@ -44,6 +46,10 @@ class _HomeScreenState extends State<HomeScreen> {
       final medicine = await _api.identifyImage(_selectedImage!);
       if (!mounted) return;
       appState.setMedicine(medicine);
+      appState.setLoading(false);
+      // Speak the same full summary shown in the medicine card.
+      await _tts.speak(medicine.speakableSummary(appState.language),
+          lang: appState.language);
     } catch (e) {
       if (!mounted) return;
       appState.setError('Something went wrong: $e');
@@ -107,7 +113,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
     if (name.isEmpty) {
       final speechError = _stt.lastError;
-      appStateError('No speech detected. Press and hold the microphone while saying a medicine name${speechError == null ? '.' : ' (speech recognition: $speechError).'}');
+      appStateError(
+          'No speech detected. Press and hold the microphone while saying a medicine name${speechError == null ? '.' : ' (speech recognition: $speechError).'}');
       return;
     }
 
@@ -118,6 +125,10 @@ class _HomeScreenState extends State<HomeScreen> {
       final medicine = await _api.identifyByName(name);
       if (!mounted) return;
       appState.setMedicine(medicine);
+      appState.setLoading(false);
+      // Voice and picture identification now give the same spoken summary.
+      await _tts.speak(medicine.speakableSummary(appState.language),
+          lang: appState.language);
     } catch (e) {
       if (!mounted) return;
       appState.setError('Medicine identification failed: $e');
@@ -129,6 +140,13 @@ class _HomeScreenState extends State<HomeScreen> {
   void appStateError(String message) {
     if (!mounted) return;
     context.read<AppState>().setError(message);
+  }
+
+  @override
+  void dispose() {
+    _stt.stopListening();
+    _tts.dispose();
+    super.dispose();
   }
 
   @override
