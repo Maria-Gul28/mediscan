@@ -52,40 +52,83 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Future<void> _toggleVoiceInput() async {
+  bool _voicePressActive = false;
+  Future<bool>? _voiceStartFuture;
+
+  Future<void> _startVoiceInput() async {
+    if (_voicePressActive || context.read<AppState>().isLoading) return;
     final appState = context.read<AppState>();
-    if (_isListening) {
-      await _stt.stopListening();
+    _voicePressActive = true;
+    appState.setError(null);
+    setState(() => _isListening = true);
+
+    // Speech starts on press-down. Keep the Future so a very quick release
+    // waits for initialization before stopping the microphone.
+    final localeId = appState.language == 'ur' ? 'ur_PK' : null;
+    _voiceStartFuture = _stt.startListening(localeId: localeId);
+    bool started;
+    try {
+      started = await _voiceStartFuture!;
+    } catch (e) {
+      started = false;
+      if (mounted) appState.setError('Could not start microphone: $e');
+    }
+
+    if (!mounted) return;
+    if (!started) {
+      _voicePressActive = false;
+      _voiceStartFuture = null;
       setState(() => _isListening = false);
+      appState.setError(
+        'Speech recognition is unavailable. Check microphone permission and your phone speech-recognition settings.',
+      );
+    }
+  }
+
+  Future<void> _stopVoiceInput() async {
+    if (!_voicePressActive && !_isListening) return;
+    // Release immediately marks the gesture inactive, then waits for speech
+    // service initialization if the user released quickly.
+    _voicePressActive = false;
+    final startFuture = _voiceStartFuture;
+    if (startFuture != null) {
+      try {
+        await startFuture;
+      } catch (_) {
+        // Start errors are shown by _startVoiceInput.
+      }
+    }
+    if (!mounted) return;
+    setState(() => _isListening = false);
+
+    final name = await _stt.stopListening();
+    _voiceStartFuture = null;
+    if (!mounted) return;
+
+    if (name.isEmpty) {
+      final speechError = _stt.lastError;
+      appStateError('No speech detected. Press and hold the microphone while saying a medicine name${speechError == null ? '.' : ' (speech recognition: $speechError).'}');
       return;
     }
 
-    setState(() => _isListening = true);
-    // When the app's current language is Urdu, hint the recognizer to
-    // expect Urdu-accented speech rather than defaulting to the device's
-    // system locale.
-    final localeId = appState.language == 'ur' ? 'ur_PK' : null;
+    final appState = context.read<AppState>();
+    appState.setLoading(true);
+    appState.setError(null);
+    try {
+      final medicine = await _api.identifyByName(name);
+      if (!mounted) return;
+      appState.setMedicine(medicine);
+    } catch (e) {
+      if (!mounted) return;
+      appState.setError('Medicine identification failed: $e');
+    } finally {
+      if (mounted) appState.setLoading(false);
+    }
+  }
 
-    await _stt.startListening(
-      localeId: localeId,
-      onResult: (text) async {
-        setState(() => _isListening = false);
-        if (text.trim().isEmpty) return;
-
-        appState.setLoading(true);
-        appState.setError(null);
-        try {
-          final medicine = await _api.identifyByName(text.trim());
-          if (!mounted) return;
-          appState.setMedicine(medicine);
-        } catch (e) {
-          if (!mounted) return;
-          appState.setError('Something went wrong: $e');
-        } finally {
-          if (mounted) appState.setLoading(false);
-        }
-      },
-    );
+  void appStateError(String message) {
+    if (!mounted) return;
+    context.read<AppState>().setError(message);
   }
 
   @override
@@ -321,9 +364,11 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
             const SizedBox(height: 12),
-            InkWell(
-              onTap: _toggleVoiceInput,
-              borderRadius: BorderRadius.circular(AppRadii.pill),
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTapDown: (_) => _startVoiceInput(),
+              onTapUp: (_) => _stopVoiceInput(),
+              onTapCancel: _stopVoiceInput,
               child: Container(
                 padding: const EdgeInsets.symmetric(vertical: 12),
                 decoration: BoxDecoration(

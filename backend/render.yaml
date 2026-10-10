@@ -6,5 +6,7 @@ services:
     plan: free
     healthCheckPath: /api/health
     envVars:
-      - key: GEMINI_API_KEY
+      - key: GROQ_API_KEY
         sync: false
+      - key: GROQ_MODEL
+        value: qwen/qwen3.8-27b

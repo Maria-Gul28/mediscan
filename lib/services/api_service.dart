@@ -4,45 +4,33 @@ import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import '../models/medicine.dart';
 
-/// Free hosts sleep when idle; the first request can take ~30-60s to wake it.
 const _timeout = Duration(seconds: 90);
 
-/// All calls to the MediScan backend. Every scan/lookup is a live call - no
-/// local database, no caching - so expect each identify call to take a few
-/// seconds.
+/// All calls to the MediScan backend. The API key remains on the backend;
+/// never put GROQ_API_KEY in the Flutter app.
 class ApiService {
   static const String baseUrl = String.fromEnvironment(
     'MEDISCAN_API_BASE',
-    defaultValue: 'https://mediscan-api.onrender.com', // <- your Render URL
+    defaultValue: 'https://mediscan-api-rzez.onrender.com',
   );
 
-  /// Sends the photographed pack for identification - reads printed text
-  /// when legible, falls back to visual recognition (pack color/shape/
-  /// design) when it isn't.
   Future<Medicine> identifyImage(File imageFile) async {
     final bytes = await imageFile.readAsBytes();
-    final base64Image = base64Encode(bytes);
-    final mimeType = _guessMimeType(imageFile.path);
-
     final uri = Uri.parse('$baseUrl/api/medicines/identify');
     final res = await http
         .post(
           uri,
           headers: {'Content-Type': 'application/json'},
-          body:
-              jsonEncode({'image_base64': base64Image, 'mime_type': mimeType}),
+          body: jsonEncode({
+            'image_base64': base64Encode(bytes),
+            'mime_type': _guessMimeType(imageFile.path),
+          }),
         )
         .timeout(_timeout);
-
-    if (res.statusCode != 200) {
-      throw ApiException(
-          'Identification failed (${res.statusCode}): ${res.body}');
-    }
-    return Medicine.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+    return Medicine.fromJson(
+        _parseJsonObject(res, operation: 'Identification'));
   }
 
-  /// Sends a transcribed medicine name (from voice input or typed text) for
-  /// identification.
   Future<Medicine> identifyByName(String name) async {
     final uri = Uri.parse('$baseUrl/api/medicines/identify-by-name');
     final res = await http
@@ -52,16 +40,10 @@ class ApiService {
           body: jsonEncode({'name': name}),
         )
         .timeout(_timeout);
-
-    if (res.statusCode != 200) {
-      throw ApiException(
-          'Identification failed (${res.statusCode}): ${res.body}');
-    }
-    return Medicine.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+    return Medicine.fromJson(
+        _parseJsonObject(res, operation: 'Identification'));
   }
 
-  /// Sends a follow-up question to the chat, grounded in [medicine] - passed
-  /// in directly since there's no database to fetch it from.
   Future<String> chat({
     required String message,
     required List<Map<String, String>> history,
@@ -81,15 +63,15 @@ class ApiService {
           }),
         )
         .timeout(_timeout);
-    if (res.statusCode != 200) {
-      throw ApiException('Chat failed (${res.statusCode})');
+    final body = _parseJsonObject(res, operation: 'Chat');
+    final reply = body['reply'];
+    if (reply is! String || reply.trim().isEmpty) {
+      throw ApiException(
+          'The server returned an empty chat reply. Please try again.');
     }
-    final body = jsonDecode(res.body) as Map<String, dynamic>;
-    return body['reply'] as String;
+    return reply;
   }
 
-  /// Asks the backend to speak [text] and returns MP3 bytes. This is what
-  /// makes Urdu audio work on phones that have no Urdu voice installed.
   Future<Uint8List> synthesizeSpeech(String text,
       {required String lang}) async {
     final uri = Uri.parse('$baseUrl/api/tts');
@@ -101,9 +83,62 @@ class ApiService {
         )
         .timeout(_timeout);
     if (res.statusCode != 200) {
-      throw ApiException('Speech failed (${res.statusCode})');
+      final detail = _errorMessageFromBody(res.body);
+      throw ApiException('Speech failed (${res.statusCode}): $detail');
+    }
+    if (res.bodyBytes.isEmpty) {
+      throw ApiException('The server returned empty audio.');
     }
     return res.bodyBytes;
+  }
+
+  Map<String, dynamic> _parseJsonObject(
+    http.Response response, {
+    required String operation,
+  }) {
+    final body = response.body.trim();
+    if (body.isEmpty) {
+      throw ApiException(
+        '$operation failed: the server returned an empty response '
+        '(HTTP ${response.statusCode}). Check the backend deployment logs.',
+      );
+    }
+    dynamic decoded;
+    try {
+      decoded = jsonDecode(body);
+    } on FormatException {
+      throw ApiException(
+        '$operation failed: the server did not return valid JSON '
+        '(HTTP ${response.statusCode}). Check the backend URL and deployment logs.',
+      );
+    }
+    if (decoded is! Map<String, dynamic>) {
+      throw ApiException(
+          '$operation failed: unexpected server response format.');
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw ApiException(
+        '$operation failed (${response.statusCode}): '
+        '${decoded['error'] ?? 'Unknown server error'}',
+      );
+    }
+    if (decoded['error'] != null) {
+      throw ApiException(decoded['error'].toString());
+    }
+    return decoded;
+  }
+
+  String _errorMessageFromBody(String body) {
+    if (body.trim().isEmpty) return 'Empty server response';
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map<String, dynamic>) {
+        return (decoded['error'] ?? 'Unknown server error').toString();
+      }
+    } catch (_) {
+      // Avoid displaying a potentially long HTML/proxy error page.
+    }
+    return 'Unexpected server response';
   }
 
   String _guessMimeType(String path) {

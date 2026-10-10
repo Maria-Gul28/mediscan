@@ -1,178 +1,174 @@
-"""
-Thin wrapper around the Google Gemini API for MediScan's AI features:
-  - ai_identify_medicine_from_image: identifies a medicine directly from a
-    photo - reads printed text when legible, falls back to visual
-    characteristics (pack color, shape, blister pattern) when it isn't.
-  - ai_identify_medicine_from_text: identifies a medicine from a spoken/typed
-    name (used for the voice-input flow - speech-to-text happens on-device,
-    the transcribed name is sent here).
-  - ai_chat_reply: the "Ask" follow-up chat, grounded in whatever medicine is
-    currently on screen (passed in directly from the app - no database).
+"""MediScan AI provider using Groq's OpenAI-compatible API.
 
-Requires GEMINI_API_KEY in the environment. Get a free key (no card required)
-at https://aistudio.google.com/apikey
-
-Note: none of this is exposed to the end user as "AI" anywhere in the app's
-UI text - the prompts below are written so the underlying model never refers
-to itself as an AI/assistant in its answers either, since that phrasing would
-leak into the chat replies shown on screen.
+Required environment variable: GROQ_API_KEY
+Optional: GROQ_MODEL (defaults to qwen/qwen3.8-27b, which supports images and JSON mode).
 """
-import os
+from __future__ import annotations
+
+import base64
 import json
-import google.generativeai as genai
+import os
+from typing import Any
 
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+from groq import Groq
 
-_MODEL_NAME = "gemini-3.6-flash"
+_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+_MODEL_NAME = os.environ.get("GROQ_MODEL", "qwen/qwen3.8-27b").strip()
+_client = Groq(api_key=_API_KEY) if _API_KEY else None
 
-_RESPONSE_SHAPE = """Respond with ONLY a JSON object, no markdown fences, no preamble, \
-matching exactly this shape:
+_RESPONSE_SHAPE = """Return a JSON object with exactly these fields:
 {
-  "identified": true or false,
+  "identified": true,
   "brand_name": "string",
   "generic_name": "string",
   "category": "one of: Fever & Pain, Allergy, Digestive, Antibiotic, Vitamins, Cold & Flu, Other",
   "purpose": {"en": "1-2 plain sentences", "ur": "same meaning in Urdu script"},
-  "dosage": {"en": "adult dosage guidance, 1-2 sentences", "ur": "same in Urdu"},
+  "dosage": {"en": "safe general guidance, 1-2 sentences", "ur": "same in Urdu"},
   "precaution": {"en": "key warning, 1 sentence", "ur": "same in Urdu"}
-}"""
+}
+Use identified=false when the image/name cannot be matched reliably. For an uncertain match, prefix brand_name with "Possibly: ". Never invent a dose, strength, active ingredient, or medical fact. If the exact product or strength cannot be verified, say to check the package and ask a pharmacist. Keep all fields present even when uncertain."""
 
-_IMAGE_LOOKUP_SYSTEM = f"""You identify medicines from a photo of a pack, blister strip, \
-bottle, or box. Read any printed text (brand name, generic name, dosage) if it's \
-legible. If the text is blurry, glared-out, or unreadable, use visual characteristics \
-instead: pack color scheme, blister foil pattern, tablet/capsule shape and color, \
-box design, logo style - and make your best educated guess at what medicine or \
-medicine category this most likely is.
+_IMAGE_SYSTEM = f"""You help identify medicines from photos of packaging, labels, bottles, or blister strips.
+Read printed text carefully. Do not identify a pill solely from its color or shape; many medicines look alike. If the label is unreadable or no medicine is visible, return identified=false and ask the user to take a clearer photo or consult a pharmacist.
 
-{_RESPONSE_SHAPE}
+Safety: do not prescribe, infer an individual dose, or invent ingredients/strength. The result is informational only and must tell users to verify the packaging with a pharmacist when uncertain.
 
-Rules:
-- If you can read the name clearly: identified=true, normal confident answer.
-- If you're guessing mainly from visual appearance (not text): identified=true, but \
-prefix brand_name with "Possibly: " and keep dosage guidance general rather than a \
-specific number (e.g. "follow package directions or ask a pharmacist").
-- If the photo doesn't show a medicine pack at all, or you genuinely cannot tell \
-anything useful about it: identified=false, brand_name="Unable to identify", \
-generic_name="Unknown", category="Other", and purpose/dosage/precaution should each \
-contain a short bilingual note advising the user to try a clearer photo or ask a \
-pharmacist directly.
-- Never invent a specific dosage number you are not reasonably confident about."""
+{_RESPONSE_SHAPE}"""
 
-_TEXT_LOOKUP_SYSTEM = f"""You identify medicines from a spoken or typed name, which may \
-be misspelled, phonetically transcribed, or in Urdu-accented English (this came from a \
-voice recording converted to text, so expect imperfect transcription - e.g. "panadole" \
-or "brufin" instead of "Panadol"/"Brufen"). Use your best judgement to match it to the \
-most likely real medicine name.
+_TEXT_SYSTEM = f"""Identify a medicine from a spoken or typed name. Speech recognition may misspell names (for example, 'panadole' for 'Panadol' or 'brufin' for 'Brufen'). If there are several plausible medicines, do not pretend certainty: use identified=false or prefix the best candidate with 'Possibly: '. Never invent an active ingredient, strength, or dosage.
 
-{_RESPONSE_SHAPE}
+{_RESPONSE_SHAPE}"""
 
-Rules:
-- If you're confident in the match despite transcription noise: identified=true, \
-normal confident answer.
-- If the name is too garbled or ambiguous to confidently match to one specific \
-medicine: identified=true, but prefix brand_name with "Possibly: " and list your best \
-guess, keeping dosage guidance general.
-- If it doesn't sound like any real medicine name at all: identified=false, \
-brand_name="Unable to identify", generic_name="Unknown", category="Other", and \
-purpose/dosage/precaution should each contain a short bilingual note asking the user \
-to try again more clearly or spell it out.
-- Never invent a specific dosage number you are not reasonably confident about."""
+_CHAT_SYSTEM_TEMPLATE = """You provide brief informational help inside MediScan, a medicine-information app. Answer in {language} using plain language, normally 2-4 sentences. Do not claim to be a doctor. Do not make up facts or provide personalized dosing. For medicine interactions, children, pregnancy, severe symptoms, overdose, or urgent concerns, advise the user to contact a pharmacist/doctor or local emergency service. If medicine context is provided, use it but do not assume it is correctly identified.
 
-_CHAT_SYSTEM_TMPL = """You are the in-app assistant for MediScan, a medicine-identification \
-app. The user is looking at the medicine below and asked a follow-up question. Answer \
-briefly (2-4 sentences), in {lang_name}, in plain language, as if you are the app itself \
-answering - do not refer to yourself as an AI, a language model, or an assistant. You are \
-not a doctor: for anything about drug interactions, dosing for children/pregnancy, or \
-symptoms that sound serious, tell them to confirm with a pharmacist or doctor rather than \
-guessing.
-
-Medicine on screen:
-{medicine_json}"""
-
-
-def _strip_json_fences(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
-    return text.strip()
+Medicine context (may be absent or uncertain):
+{medicine_context}"""
 
 
 class AiQuotaError(Exception):
-    """Raised when the Gemini API rejects a call for hitting a rate/quota
-    limit (HTTP 429), so app.py can return a clean, user-facing message
-    instead of the raw provider error text."""
-    pass
+    """A Groq request was rejected because of a rate/quota limit."""
 
 
-def _call_gemini(fn, *args, **kwargs):
-    """Runs a Gemini call and re-raises quota/rate-limit failures as
-    AiQuotaError so callers (app.py) can handle them distinctly from other
-    failures (bad image, network issue, etc)."""
+def _client_or_raise() -> Groq:
+    if _client is None:
+        raise RuntimeError("GROQ_API_KEY is not configured on the backend.")
+    return _client
+
+
+def _json_from_response(content: str | None) -> dict[str, Any]:
+    if not content or not content.strip():
+        raise ValueError("The AI provider returned an empty response. Please try again.")
+    text = content.strip()
+    if text.startswith("```"):
+        pieces = text.split("```")
+        if len(pieces) >= 2:
+            text = pieces[1].strip()
+            if text.lower().startswith("json"):
+                text = text[4:].strip()
     try:
-        return fn(*args, **kwargs)
+        result = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("The AI provider returned invalid JSON. Please try again.") from exc
+    if not isinstance(result, dict):
+        raise ValueError("The AI provider returned an unexpected response format.")
+
+    # Normalize nested values to the exact structure expected by Flutter.
+    result.setdefault("identified", False)
+    result.setdefault("brand_name", "Unable to identify")
+    result.setdefault("generic_name", "Unknown")
+    result.setdefault("category", "Other")
+    for field, fallback_en, fallback_ur in (
+        ("purpose", "Unable to confirm. Please check the package with a pharmacist.", "تصدیق نہیں ہو سکی۔ براہِ کرم فارماسسٹ سے تصدیق کریں۔"),
+        ("dosage", "Follow the package label and ask a pharmacist; do not rely on this result for dosing.", "پیکٹ پر درج ہدایات دیکھیں اور فارماسسٹ سے پوچھیں۔ صرف اس جواب کی بنیاد پر خوراک نہ لیں۔"),
+        ("precaution", "Verify the medicine and strength with a pharmacist before use.", "استعمال سے پہلے دوا اور اس کی طاقت کی فارماسسٹ سے تصدیق کریں۔"),
+    ):
+        value = result.get(field)
+        if not isinstance(value, dict):
+            value = {}
+        result[field] = {
+            "en": str(value.get("en") or fallback_en),
+            "ur": str(value.get("ur") or fallback_ur),
+        }
+    result["identified"] = bool(result["identified"])
+    for field in ("brand_name", "generic_name", "category"):
+        result[field] = str(result[field] or "Unknown")
+    return result
+
+
+def _call_groq(messages: list[dict[str, Any]], *, json_mode: bool = False, max_tokens: int = 900) -> str:
+    client = _client_or_raise()
+    try:
+        kwargs: dict[str, Any] = {
+            "model": _MODEL_NAME,
+            "messages": messages,
+            "temperature": 0.2,
+            "max_completion_tokens": max_tokens,
+        }
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        response = client.chat.completions.create(**kwargs)
+        content = response.choices[0].message.content
+        if not content:
+            raise ValueError("The AI provider returned an empty response. Please try again.")
+        return content
     except Exception as exc:  # noqa: BLE001
-        msg = str(exc)
-        if "429" in msg or "quota" in msg.lower() or "rate limit" in msg.lower():
-            raise AiQuotaError(
-                "The identification service is temporarily busy (rate/quota "
-                "limit reached). Please try again shortly."
-            ) from exc
+        status_code = getattr(exc, "status_code", None)
+        message = str(exc).lower()
+        if status_code == 429 or "rate limit" in message or "quota" in message or "too many requests" in message:
+            raise AiQuotaError("Groq's free API limit has been reached. Please wait for the limit to reset and try again.") from exc
         raise
 
 
-def ai_identify_medicine_from_image(image_bytes: bytes, mime_type: str) -> dict:
-    model = genai.GenerativeModel(
-        model_name=_MODEL_NAME,
-        system_instruction=_IMAGE_LOOKUP_SYSTEM,
-        generation_config={"response_mime_type": "application/json"},
+def ai_identify_medicine_from_image(image_bytes: bytes, mime_type: str) -> dict[str, Any]:
+    if not image_bytes:
+        raise ValueError("The uploaded image is empty.")
+    if mime_type not in {"image/jpeg", "image/png", "image/webp"}:
+        mime_type = "image/jpeg"
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    data_url = f"data:{mime_type};base64,{encoded}"
+    content = _call_groq(
+        [
+            {"role": "system", "content": _IMAGE_SYSTEM},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Identify the medicine shown. Read the printed label if possible. Return only the required JSON object."},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            },
+        ],
+        json_mode=True,
     )
-    image_part = {"mime_type": mime_type, "data": image_bytes}
-
-    def _run():
-        resp = model.generate_content(
-            [image_part, "Identify the medicine shown in this photo."]
-        )
-        return json.loads(_strip_json_fences(resp.text))
-
-    return _call_gemini(_run)
+    return _json_from_response(content)
 
 
-def ai_identify_medicine_from_text(name: str) -> dict:
-    model = genai.GenerativeModel(
-        model_name=_MODEL_NAME,
-        system_instruction=_TEXT_LOOKUP_SYSTEM,
-        generation_config={"response_mime_type": "application/json"},
+def ai_identify_medicine_from_text(name: str) -> dict[str, Any]:
+    clean_name = (name or "").strip()
+    if not clean_name:
+        raise ValueError("Please provide a medicine name.")
+    content = _call_groq(
+        [
+            {"role": "system", "content": _TEXT_SYSTEM},
+            {"role": "user", "content": f'Identify this spoken/typed medicine name: "{clean_name}". Return only the required JSON object.'},
+        ],
+        json_mode=True,
     )
-
-    def _run():
-        resp = model.generate_content(f'Transcribed name: "{name}"')
-        return json.loads(_strip_json_fences(resp.text))
-
-    return _call_gemini(_run)
+    return _json_from_response(content)
 
 
 def ai_chat_reply(message: str, history: list, lang: str, medicine: dict | None) -> str:
-    lang_name = "Urdu" if lang == "ur" else "English"
-    system = _CHAT_SYSTEM_TMPL.format(
-        lang_name=lang_name,
-        medicine_json=json.dumps(medicine, ensure_ascii=False) if medicine else "none shown",
+    language = "Urdu" if lang == "ur" else "English"
+    system = _CHAT_SYSTEM_TEMPLATE.format(
+        language=language,
+        medicine_context=json.dumps(medicine, ensure_ascii=False) if medicine else "No medicine is currently shown.",
     )
-    model = genai.GenerativeModel(model_name=_MODEL_NAME, system_instruction=system)
-
-    gemini_history = [
-        {
-            "role": "model" if h.get("role") == "assistant" else "user",
-            "parts": [h.get("text", "")],
-        }
-        for h in history
-        if h.get("text")
-    ]
-    chat = model.start_chat(history=gemini_history)
-
-    def _run():
-        resp = chat.send_message(message)
-        return resp.text
-
-    return _call_gemini(_run)
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+    for item in (history or [])[-12:]:
+        if not isinstance(item, dict):
+            continue
+        role = "assistant" if item.get("role") == "assistant" else "user"
+        text = item.get("text")
+        if isinstance(text, str) and text.strip():
+            messages.append({"role": role, "content": text[:3000]})
+    messages.append({"role": "user", "content": message.strip()[:3000]})
+    return _call_groq(messages, max_tokens=500).strip()
