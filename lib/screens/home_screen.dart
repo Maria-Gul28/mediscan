@@ -70,8 +70,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     // Speech starts on press-down. Keep the Future so a very quick release
     // waits for initialization before stopping the microphone.
-    final localeId = appState.language == 'ur' ? 'ur_PK' : null;
-    _voiceStartFuture = _stt.startListening(localeId: localeId);
+    _voiceStartFuture = _stt.startListening(urdu: appState.language == 'ur');
     bool started;
     try {
       started = await _voiceStartFuture!;

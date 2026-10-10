@@ -2,6 +2,10 @@
 
 Required environment variable: GROQ_API_KEY
 Optional: GROQ_MODEL (defaults to qwen/qwen3.8-27b, which supports images and JSON mode).
+
+Image and voice/name identification share ONE set of card rules (_CARD_RULES)
+and ONE JSON shape, so the card, the Urdu text and the spoken summary come out
+in the same format whichever input the user used.
 """
 from __future__ import annotations
 
@@ -16,38 +20,52 @@ _API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 _MODEL_NAME = os.environ.get("GROQ_MODEL", "qwen/qwen3.8-27b").strip()
 _client = Groq(api_key=_API_KEY) if _API_KEY else None
 
+# ---------------------------------------------------------------------------
+# Shared by BOTH the image path and the name/voice path.
+# ---------------------------------------------------------------------------
 _RESPONSE_SHAPE = """Return a JSON object with exactly these fields:
 {
   "identified": true,
-  "brand_name": "string",
-  "generic_name": "string",
+  "brand_name": "string, always in standard Latin-script spelling",
+  "brand_name_ur": "the brand name written in Urdu script so an Urdu voice pronounces it correctly (no 'Possibly:' prefix)",
+  "generic_name": "string, Latin script",
   "category": "one of: Fever & Pain, Allergy, Digestive, Antibiotic, Vitamins, Cold & Flu, Other",
   "purpose": {"en": "1-2 plain sentences", "ur": "same meaning in Urdu script"},
   "dosage": {"en": "safe general guidance, 1-2 sentences", "ur": "same in Urdu"},
   "precaution": {"en": "key warning, 1 sentence", "ur": "same in Urdu"}
 }
-Use identified=false when the image/name cannot be matched reliably. For an uncertain match, prefix brand_name with "Possibly: ". Never invent a dose, strength, active ingredient, or medical fact. If the exact product or strength cannot be verified, say to check the package and ask a pharmacist. Keep all fields present even when uncertain."""
+Use identified=false when the medicine cannot be matched reliably. For an uncertain match, prefix brand_name with "Possibly: ". Keep all fields present even when uncertain."""
 
-_IMAGE_SYSTEM = f"""You help identify medicines from photos of packaging, labels, bottles, or blister strips.
-Read printed text carefully. Do not identify a pill solely from its color or shape; many medicines look alike. If the label is unreadable or no medicine is visible, return identified=false and ask the user to take a clearer photo or consult a pharmacist.
-
-Safety: do not prescribe, infer an individual dose, or invent ingredients/strength. The result is informational only and must tell users to verify the packaging with a pharmacist when uncertain.
+_CARD_RULES = f"""CARD RULES (identical for every input method):
+- Write the card the same way no matter whether the medicine came from a photo or from a spoken/typed name: same fields, same level of detail, same tone.
+- "purpose": what the medicine is generally used for, in plain words a non-medical person understands.
+- "dosage": general adult guidance only if it is reliably established; otherwise tell the user to follow the package label and ask a pharmacist. Never give a personalised dose. Never invent a strength.
+- "precaution": the single most important warning.
+- Urdu fields must be natural, correct Urdu in Urdu script (not transliterated English), carrying the same meaning as the English fields. Keep medical terms simple.
+- Never invent an active ingredient, strength, or medical fact. If something cannot be verified, say to check the package and ask a pharmacist.
+- The result is informational only.
 
 {_RESPONSE_SHAPE}"""
 
+_IMAGE_SYSTEM = f"""You help identify medicines from photos of packaging, labels, bottles, or blister strips.
+Read printed text carefully. Do not identify a pill solely from its color or shape; many medicines look alike. If the label is unreadable or no medicine is visible, return identified=false and ask the user to take a clearer photo or consult a pharmacist.
+Do not prescribe or infer an individual dose.
+
+{_CARD_RULES}"""
+
 _TEXT_SYSTEM = f"""You identify medicines from a spoken or typed name, often transcribed by phone speech recognition.
 
-The input may be an approximate phonetic spelling rather than the medicine's correct spelling. Be tolerant of pronunciation and transcription variation, including South Asian / Pakistani accents, Urdu-influenced English, vowel changes, dropped or added syllables, similar-sounding consonants, and words split or joined incorrectly. For example, a transcript like "panadole" may mean "Panadol" and "brufin" may mean "Brufen". Treat these as examples of the general problem, not as a closed list of accepted variants.
+The input may be Latin script OR Urdu script (for example "پیناڈول" is Panadol, "بروفن" is Brufen). It may also be an approximate phonetic spelling rather than the correct spelling. Be tolerant of pronunciation and transcription variation, including South Asian / Pakistani accents, Urdu-influenced English, vowel changes, dropped or added syllables, similar-sounding consonants, and words split or joined incorrectly. "panadole" may mean "Panadol" and "brufin" may mean "Brufen"; treat these as examples of the general problem, not a closed list.
 
-Before identifying the medicine, mentally generate plausible brand-name candidates that sound like the transcript, then compare them with real, known medicines. Use the full sound pattern, not just a loose spelling resemblance. If one established medicine is a strong match, identify it and use its correct standard spelling. Do not require the user to pronounce or spell a brand perfectly.
+Before identifying, mentally generate plausible brand-name candidates that sound like the transcript, then compare them with real, known medicines. Use the full sound pattern, not just a loose spelling resemblance. If one established medicine is a strong match, identify it and use its correct standard Latin-script spelling in brand_name, whatever script the input was in. Do not require the user to pronounce or spell a brand perfectly.
 
 SAFETY RULES:
 - Do not guess a medicine merely because it is common or because one name looks vaguely similar.
 - If two or more real medicines could plausibly match, or the match is weak, set identified=false or prefix brand_name with "Possibly: ". State that the user should confirm the name from the package or with a pharmacist.
 - Never infer the product's strength, active ingredient, formulation, or dosage from a brand name alone unless the fact is reliably established. Never invent dosage instructions.
-- Do not treat a phonetic match as proof that the medicine itself has been verified. Keep all fields in the required JSON shape.
+- A phonetic match is not proof the medicine has been verified.
 
-{_RESPONSE_SHAPE}"""
+{_CARD_RULES}"""
 
 _CHAT_SYSTEM_TEMPLATE = """You provide brief informational help inside MediScan, a medicine-information app. Answer in {language} using plain language, normally 2-4 sentences. Do not claim to be a doctor. Do not make up facts or provide personalized dosing. For medicine interactions, children, pregnancy, severe symptoms, overdose, or urgent concerns, advise the user to contact a pharmacist/doctor or local emergency service. If medicine context is provided, use it but do not assume it is correctly identified.
 
@@ -85,6 +103,7 @@ def _json_from_response(content: str | None) -> dict[str, Any]:
     # Normalize nested values to the exact structure expected by Flutter.
     result.setdefault("identified", False)
     result.setdefault("brand_name", "Unable to identify")
+    result.setdefault("brand_name_ur", "")
     result.setdefault("generic_name", "Unknown")
     result.setdefault("category", "Other")
     for field, fallback_en, fallback_ur in (
@@ -102,16 +121,23 @@ def _json_from_response(content: str | None) -> dict[str, Any]:
     result["identified"] = bool(result["identified"])
     for field in ("brand_name", "generic_name", "category"):
         result[field] = str(result[field] or "Unknown")
+    result["brand_name_ur"] = str(result["brand_name_ur"] or "")
     return result
 
 
-def _call_groq(messages: list[dict[str, Any]], *, json_mode: bool = False, max_tokens: int = 900) -> str:
+def _call_groq(
+    messages: list[dict[str, Any]],
+    *,
+    json_mode: bool = False,
+    max_tokens: int = 900,
+    temperature: float = 0.2,
+) -> str:
     client = _client_or_raise()
     try:
         kwargs: dict[str, Any] = {
             "model": _MODEL_NAME,
             "messages": messages,
-            "temperature": 0.2,
+            "temperature": temperature,
             "max_completion_tokens": max_tokens,
         }
         if json_mode:
@@ -148,6 +174,7 @@ def ai_identify_medicine_from_image(image_bytes: bytes, mime_type: str) -> dict[
             },
         ],
         json_mode=True,
+        temperature=0,  # deterministic wording so repeat scans match
     )
     return _json_from_response(content)
 
@@ -162,6 +189,7 @@ def ai_identify_medicine_from_text(name: str) -> dict[str, Any]:
             {"role": "user", "content": f'Identify this spoken/typed medicine name: "{clean_name}". Return only the required JSON object.'},
         ],
         json_mode=True,
+        temperature=0,  # deterministic wording so repeat scans match
     )
     return _json_from_response(content)
 
