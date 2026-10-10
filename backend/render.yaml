@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: mediscan-api
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false   # you paste the value in the Render dashboard

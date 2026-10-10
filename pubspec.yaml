@@ -1,0 +1,48 @@
+name: mediscan
+description: Scan, understand, and listen to medicine information in English and Urdu.
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Camera / gallery image capture
+  image_picker: ^1.1.2
+
+  # On-device OCR (Latin script - reads the printed English name on the pack)
+  google_mlkit_text_recognition: ^0.13.1
+
+  # Networking to our Flask backend
+  http: ^1.2.2
+
+  # Text-to-speech playback (English + Urdu where the device voice pack supports it)
+  flutter_tts: ^4.1.0
+
+  # State management
+  provider: ^6.1.2
+
+  # Local caching of recent scans (optional but nice for offline recall)
+  shared_preferences: ^2.3.2
+
+  cupertino_icons: ^1.0.8
+  speech_to_text: ^7.5.0
+  audioplayers: ^6.8.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  # Bundle a Urdu-capable font so Urdu text always renders correctly
+  # even on devices without a system Urdu font (drop a .ttf here, e.g. Jameel Noori Nastaleeq
+  # or Noto Nastaliq Urdu - https://fonts.google.com/noto/specimen/Noto+Nastaliq+Urdu)
+  fonts:
+    - family: NotoNastaliqUrdu
+      fonts:
+        - asset: assets/fonts/NotoNastaliqUrdu-Regular.ttf

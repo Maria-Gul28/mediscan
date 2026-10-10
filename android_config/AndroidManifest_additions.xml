@@ -1,0 +1,14 @@
+<!--
+  After `flutter create .`, open android/app/src/main/AndroidManifest.xml
+  and add these two lines just above the <application> tag.
+-->
+<uses-permission android:name="android.permission.CAMERA" />
+<uses-permission android:name="android.permission.INTERNET" />
+
+<!--
+  Also inside <application ...>, add this so ML Kit's text recognition model
+  is bundled and downloaded correctly:
+-->
+<meta-data
+    android:name="com.google.mlkit.vision.DEPENDENCIES"
+    android:value="ocr" />

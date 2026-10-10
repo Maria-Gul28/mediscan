@@ -1,0 +1,9 @@
+<!--
+  After `flutter create .`, open ios/Runner/Info.plist and add these keys
+  inside the outer <dict>. Both are required by App Store review since the
+  app uses the camera and photo library.
+-->
+<key>NSCameraUsageDescription</key>
+<string>MediScan needs camera access to photograph medicine packs so it can identify them.</string>
+<key>NSPhotoLibraryUsageDescription</key>
+<string>MediScan needs photo library access so you can pick an existing photo of a medicine pack.</string>
